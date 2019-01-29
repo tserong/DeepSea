@@ -113,6 +113,7 @@ class DriveGroups(object):
         self.drive_groups_path: str = '/srv/salt/ceph/configuration/files/drive_groups.yml'
         self.drive_groups: dict = self._get_drive_groups()
 
+
     def _load_drive_group_file(self) -> str:
         """ Load the drive_group file """
         with open(self.drive_groups_path, 'r') as _fd:
@@ -132,7 +133,8 @@ class DriveGroups(object):
 
         return ret
 
-    def call_out(self, command: str, alias: str = None) -> list:
+    def call_out(self, command: str, module: str = 'dg',
+                 alias: str = None) -> list:
         """ Call minion modules to get matching disks"""
         ret: list = list()
         for dg_name, dg_values in self.drive_groups.items():
@@ -140,7 +142,11 @@ class DriveGroups(object):
             dgo = DriveGroup(dg_name, dg_values)
             ret.append(
                 self.call(
-                    dgo.target(), dgo.filter_args(), command, alias=alias))
+                    dgo.target(),
+                    dgo.filter_args(),
+                    command,
+                    module=module,
+                    alias=alias))
         # There is a __context__ variable which allow you to pass
         # rcs and stuff to the orchestration
         return ret
@@ -149,18 +155,19 @@ class DriveGroups(object):
              target: str,
              filter_args: dict,
              command: str,
+             module: str = 'dg',
              alias: str = None):
         """ Calls out to the minion"""
         command_name: str = command
         if alias:
             command_name = alias
-        log.debug("Calling dg.{} on compound target {}".format(
-            command_name, target))
-        print("Calling dg.{} on compound target {}".format(
-            command_name, target))
+        log.debug("Calling {}.{} on compound target {}".format(
+            module, command_name, target))
+        print("Calling {}.{} on compound target {}".format(
+            module, command_name, target))
         ret: str = self.local_client.cmd(
             target,
-            'dg.{}'.format(command),
+            '{}.{}'.format(module, command),
             kwarg={
                 'filter_args': filter_args,
                 'dry_run': self.dry_run
@@ -182,6 +189,10 @@ def c_v_commands(**kwargs):
 def deploy(**kwargs):
     """ Execute the ceph-volume command to deploy OSDs"""
     return DriveGroups(**kwargs).call_out('deploy')
+
+
+def details(**kwargs):
+    return DriveGroups(**kwargs).call_out('attr_list', module='cephdisks')
 
 
 def report(**kwargs):

@@ -1,4 +1,3 @@
-
 {% set label = "multiple" %}
 
 Disengage {{ label }}:
@@ -7,7 +6,7 @@ Disengage {{ label }}:
 
 Multiple arguments:
   salt.runner:
-    - name: remove.osd
+    - name: osd.remove
     - arg:
       - 0
       - 1
@@ -27,4 +26,3 @@ Wait for Ceph {{ label }}:
   salt.state:
     - tgt: {{ salt['master.minion']() }}
     - sls: ceph.wait.until.OK
-

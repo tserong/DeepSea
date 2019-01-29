@@ -766,6 +766,8 @@ def c_v_commands(**kwargs):
     """
     Construct the ceph-volume command based on the
     matching disks
+    Provide the --no-auto switch to avoid unwanted
+    wal/db setups.
     """
     filter_args = kwargs.get('filter_args', dict())
     if not filter_args:
@@ -775,7 +777,8 @@ def c_v_commands(**kwargs):
     log.error(kwargs)
     if not dgo.data_devices:
         return ""
-    cmd = "ceph-volume lvm batch {}".format(' '.join(dgo.data_devices))
+    cmd = "ceph-volume lvm batch --no-auto {}".format(' '.join(
+        dgo.data_devices))
 
     # Compute difference between two lists
 
@@ -809,6 +812,10 @@ def c_v_commands(**kwargs):
 def deploy(**kwargs):
     """ Execute the generated ceph-volume commands """
     return __salt__['helper.run'](c_v_commands(**kwargs))
+
+
+def drive_info(**wkargs):
+    print('all the drive infojk')
 
 
 def _help():

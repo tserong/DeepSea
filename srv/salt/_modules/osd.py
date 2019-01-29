@@ -252,8 +252,7 @@ class OSDWeight(object):
             'delay': 6
         }
         self.settings.update(kwargs)
-        log.debug("settings: {}".format(pprint.pformat(self.settings)))
-        # self.cluster = rados.Rados(conffile=self.settings['conf'])
+        log.debug("settings for OSDWeight: {}".format(pprint.pformat(self.settings)))
         self.cluster = rados.Rados(conffile=self.settings['conf'],
                                    conf=dict(keyring=self.settings['keyring']),
                                    name=self.settings['client'])
@@ -355,8 +354,9 @@ class OSDWeight(object):
         while i < self.settings['timeout']/self.settings['delay']:
             rc, msg = self.osd_safe_to_destroy()
             if rc == 0:
-                log.info("osd.{} is safe to destroy".format(self.osd_id))
-                return ""
+                ret = "osd.{} is safe to destroy".format(self.osd_id)
+                log.info(ret)
+                return ret
             entry = self.osd_df()
             if 'pgs' in entry:
                 if entry['pgs'] == 0:
@@ -1441,308 +1441,21 @@ def split_partition(_partition):
     # return None, None
 
 
-class OSDRemove(object):
+def empty(osd_id, **kwargs):
     """
-    Manage the graceful removal of an OSD
-    """
-
-    # pylint: disable=unused-argument
-    def __init__(self, osd_id, device, weight, grains, force=False, human=True, **kwargs):
-        """
-        Initialize settings
-        """
-        self.osd_id = osd_id
-        self.osd_fsid = device.osd_fsid
-        self.device = device
-        self.partitions = self.set_partitions()
-        self._weight = weight
-        self._grains = grains
-        self.force = force
-        self.human = human
-        self.keyring = kwargs.get('keyring', None)
-        self.client = kwargs.get('client', None)
-
-    def set_partitions(self):
-        """
-        Return queried partitions or fallback to grains
-        """
-        _partitions = self.device.partitions(self.osd_id)
-        if not _partitions:
-            log.debug("grains: \n{}".format(pprint.pformat(__grains__['ceph'])))
-            if str(self.osd_id) in __grains__['ceph']:
-                _partitions = __grains__['ceph'][str(self.osd_id)]['partitions']
-            else:
-                log.error("Id {} missing from grains".format(self.osd_id))
-                return None
-        log.debug("partitions: \n{}".format(pprint.pformat(_partitions)))
-        return _partitions
-
-    # pylint: disable=too-many-return-statements
-    def remove(self):
-        """
-        Wrapper for removing an OSD
-        """
-        if not self.partitions:
-            msg = "OSD {} is not present on minion {}".format(self.osd_id, __grains__['id'])
-            log.error(msg)
-            return msg
-
-        if self.force:
-            log.warning("Forcing OSD removal")
-
-            # Terminate
-            self.terminate()
-
-            # Best effort depending on the reason for the forced removal
-            self.mark_destroyed()
-            update_destroyed(self._osd_disk(), self.osd_id)
-        else:
-            for func in [self.empty, self.terminate]:
-                msg = func()
-                if self.human and msg:
-                    log.error(msg)
-                    return msg
-
-            # Inform Ceph
-            #
-            # Consider this a hard requirement for graceful removal. If the
-            # OSD cannot be marked and recorded, stop the process.
-            if self.mark_destroyed():
-                msg = update_destroyed(self._osd_disk(), self.osd_id)
-                if msg:
-                    log.error(msg)
-                    return msg
-                log.info("OSD {} marked and recorded".format(self.osd_id))
-            else:
-                msg = "Failed to mark OSD {} as destroyed".format(self.osd_id)
-                log.error(msg)
-                return msg
-
-        for func in [self.unmount, self.wipe, self.destroy]:
-            msg = func()
-            if msg:
-                log.error(msg)
-                return msg
-
-        # Remove grain
-        self._grains.delete(self.osd_id)
-
-        return ""
-
-    def empty(self):
-        """
-        Wait until all PGs evacuate an OSD
-        """
-        self._weight.save()
-        _rc, _stdout, _stderr = self._weight.update_weight('0.0')
-        if _rc != 0:
-            msg = "Reweight failed"
-            log.error(msg)
-            return msg
-        return self._weight.wait()
-
-    def terminate(self):
-        """
-        Stop the ceph-osd without error
-        """
-        cmd = "systemctl disable ceph-osd@{}".format(self.osd_id)
-        __salt__['helper.run'](cmd)
-        # How long will this hang on a broken OSD
-        cmd = "systemctl stop ceph-osd@{}".format(self.osd_id)
-        __salt__['helper.run'](cmd)
-        cmd = r"pkill -f ceph-osd.*id\ {}\ --".format(self.osd_id)
-        __salt__['helper.run'](cmd)
-        time.sleep(1)
-        cmd = r"pkill -9 -f ceph-osd.*id\ {}\ --".format(self.osd_id)
-        __salt__['helper.run'](cmd)
-        time.sleep(1)
-        cmd = r"pgrep -f ceph-osd.*id\ {}\ --".format(self.osd_id)
-        _rc, _stdout, _stderr = __salt__['helper.run'](cmd)
-        if _rc == 0:
-            return "Failed to terminate OSD {} - pid {}".format(self.osd_id, _stdout)
-        return ""
-
-    def unmount(self):
-        """
-        Unmount any related filesystems
-        """
-        mounted = self._mounted()
-        with open("/proc/mounts", "r") as mounts:
-            for line in mounts:
-                entry = line.split()
-                if '/dev/mapper' in entry[0]:
-                    mount = readlink(entry[0])
-                else:
-                    mount = entry[0]
-                if mount in mounted:
-                    cmd = "umount {}".format(mount)
-                    _rc, _stdout, _stderr = __salt__['helper.run'](cmd)
-                    log.debug("returncode: {}".format(_rc))
-                    if _rc != 0:
-                        msg = "Unmount failed - check for processes on {}".format(entry[0])
-                        log.error(msg)
-                        return msg
-                    os.rmdir(entry[1])
-
-        if '/dev/dm' in self.partitions['osd']:
-            cmd = "dmsetup remove {}".format(self.partitions['osd'])
-            __salt__['helper.run'](cmd)
-        return ""
-
-    def _mounted(self):
-        """
-        Find the mount points for the OSD and lockbox.
-        """
-        _devices = []
-        for attr in ['osd', 'lockbox']:
-            if attr in self.partitions:
-                _devices.append(readlink(self.partitions[attr]))
-        log.debug("mounted: {}".format(_devices))
-        return _devices
-
-    def wipe(self):
-        """
-        Erase the beginning of any filesystems
-        """
-        if self.partitions:
-            for _, _partition in six.iteritems(self.partitions):
-                if os.path.exists(_partition):
-                    cmd = "dd if=/dev/zero of={} bs=4M count=1 oflag=direct".format(_partition)
-                    _rc, _stdout, _stderr = __salt__['helper.run'](cmd)
-                    if _rc != 0:
-                        return "Failed to wipe partition {}".format(_partition)
-        else:
-            msg = "Nothing to wipe - no partitions available"
-            log.warning(msg)
-        return ""
-
-    def destroy(self):
-        """
-        Destroy the osd disk and any partitions on other disks
-        """
-        # pylint: disable=attribute-defined-outside-init
-        self.osd_disk = self._osd_disk()
-        msg = self._delete_partitions()
-        if msg:
-            return msg
-        self._wipe_gpt_backups()
-
-        msg = self._delete_osd()
-        if msg:
-            return msg
-
-        self._settle()
-        return ""
-
-    def _osd_disk(self):
-        """
-        Determine the data disk of an OSD
-        """
-        if 'lockbox' in self.partitions:
-            _partition = self.partitions['lockbox']
-        else:
-            _partition = self.partitions['osd']
-        disk, _ = split_partition(_partition)
-        return disk
-
-    def _delete_partitions(self):
-        """
-        Delete the partitions
-        """
-        for attr in self.partitions:
-            log.debug("Checking attr {}".format(attr))
-            if '/dev/dm' in self.partitions[attr]:
-                cmd = "dmsetup remove {}".format(self.partitions[attr])
-                __salt__['helper.run'](cmd)
-                continue
-
-            short_name = readlink(self.partitions[attr])
-            exists = os.path.exists(short_name)
-            if not exists and 'nvme' in short_name:
-                time.sleep(1)
-                # NVMe devices just might not be there the first time
-                log.info("Check {} once more".format(short_name))
-                exists = os.path.exists(short_name)
-
-            if exists:
-                if self.osd_disk and self.osd_disk in short_name:
-                    log.info("No need to delete {}".format(short_name))
-                else:
-                    disk, _partition = split_partition(self.partitions[attr])
-                    if disk:
-                        log.debug("disk: {} partition: {}".format(disk, _partition))
-                        cmd = "sgdisk -d {} {}".format(_partition, disk)
-                        _rc, _stdout, _stderr = __salt__['helper.run'](cmd)
-                        if _rc != 0:
-                            return "Failed to delete partition {} on {}".format(_partition, disk)
-            else:
-                log.error("Partition {} does not exist".format(short_name))
-        return ""
-
-    def _wipe_gpt_backups(self):
-        """
-        Wipe the backup GPT partitions
-        """
-        if self.osd_disk and os.path.exists(self.osd_disk):
-            cmd = "blockdev --getsz {}".format(self.osd_disk)
-            _, _stdout, _stderr = __salt__['helper.run'](cmd)
-            end_of_disk = int(_stdout)
-            seek_position = int(end_of_disk/4096 - 33)
-            cmd = ("dd if=/dev/zero of={} bs=4096 count=33 seek={} "
-                   "oflag=direct".format(self.osd_disk, seek_position))
-            __salt__['helper.run'](cmd)
-        return ""
-
-    def _delete_osd(self):
-        """
-        Erase the data disk
-        """
-        if self.osd_disk and os.path.exists(self.osd_disk):
-            cmd = "sgdisk -Z --clear -g {}".format(self.osd_disk)
-            _rc, _stdout, _stderr = __salt__['helper.run'](cmd)
-            if _rc != 0:
-                msg = "Failed to delete OSD {}".format(self.osd_disk)
-                log.error(msg)
-                return msg
-        return ""
-
-    # pylint: disable=no-self-use
-    def _settle(self):
-        """
-        Wait for the OS to update
-        """
-        for cmd in ['udevadm settle --timeout=20',
-                    'partprobe',
-                    'udevadm settle --timeout=20']:
-            __salt__['helper.run'](cmd)
-
-    def mark_destroyed(self):
-        """
-        Mark the ID as destroyed in Ceph
-        """
-        auth = ""
-        if self.keyring and self.client:
-            auth = "--keyring={} --name={}".format(self.keyring, self.client)
-        cmd = "ceph {} osd destroy {} --yes-i-really-mean-it".format(auth, self.osd_id)
-        _rc, _stdout, _stderr = __salt__['helper.run'](cmd)
-        return _rc == 0
-
-
-def remove(osd_id, **kwargs):
-    """
-    Remove an OSD
+    empty an OSD
     """
     settings = _settings(**kwargs)
 
-    if 'force' in kwargs and kwargs['force']:
-        osdw = None
-    else:
-        osdw = OSDWeight(osd_id, **settings)
-    osdd = OSDDevices()
-    osdg = OSDGrains(osdd)
+    osdw = OSDWeight(osd_id, **settings)
 
-    osdr = OSDRemove(osd_id, osdd, osdw, osdg, **settings)
-    return osdr.remove()
+    osdw.save()
+    _rc, _stdout, _stderr = osdw.update_weight('0.0')
+    if _rc != 0:
+        msg = "Reweight failed"
+        log.error(msg)
+        return msg
+    return osdw.wait()
 
 
 def is_empty(osd_id, **kwargs):
@@ -2477,5 +2190,4 @@ def takeover():
 
 __func_alias__ = {
                 'list_': 'list',
-                'empty': 'zero_weight',
                 }
