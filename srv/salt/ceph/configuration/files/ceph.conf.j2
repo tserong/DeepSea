@@ -39,6 +39,8 @@ mon health preluminous compat warning = false
 {% include "ceph/configuration/files/ceph.conf.d/mon.conf" ignore missing %}
 
 [mgr]
+debug mgr = 20
+log to syslog = true
 {% include "ceph/configuration/files/ceph.conf.d/mgr.conf" ignore missing %}
 
 [mds]
